@@ -1,8 +1,10 @@
-name = "AI Engineer"
-print(f"Hello, {name}. Let's start your AI Journey!")
-
-a = input("Are you ready to start your millionaire path? (Y/N): ")
-if a == 'Y':
-    print("Excellent!")
-else:
-    print("Why not?")
+print("---CALCULATOR---")
+a = int(input("Enter the first value: "))
+b = int(input("Enter the second value: "))
+c = input("What arithmetical operation do you want to do? (+/-): ")
+if c == '+':
+    d = a + b
+    print(d)
+if c == '-':
+    d = a - b
+    print(d)
