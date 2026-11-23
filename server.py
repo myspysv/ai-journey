@@ -1,7 +1,26 @@
-from fastapi import FastAPI
+import os
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+from openai import OpenAI
 
-app = FastAPI()
+load_dotenv()
+
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise ValueError("Помилка: OPENAI_API_KEY не знайдено у файлі .env!")
+
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=api_key,
+)
+
+app = FastAPI(title="My First AI Microservice")
+
+class AIRequest(BaseModel):
+    prompt: str = Field(min_length=2, max_length=2000)
+    system_prompt: str = "You are a helpful AI assistant."
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
 
 class PromptRequest(BaseModel):
     prompt: str
@@ -24,11 +43,54 @@ class ChatCompletionRequest(BaseModel):
     model: str = "gpt-4o"
     messages: list[ChatMessage]
 
+class TranslateRequest(BaseModel):
+    text: str
+    target_language: str = "English"
+
 students_db = [
     {"id": 1, "name": "Alex", "score": 95},
     {"id": 2, "name": "Maria", "score": 82},
     {"id": 3, "name": "Ivan", "score": 68}
 ]
+
+@app.post("/translate")
+def translate(request: TranslateRequest):
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": f"You are a professional translator. Translate the user's text into {request.target_language}. Return ONLY the translation, no extra words."},
+                {"role": "user", "content": request.text}
+            ],
+        )
+        reply = completion.choices[0].message.content
+        return {
+            "original": request.text,
+            "language": request.target_language,
+            "translation": reply
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI Provider Error: {str(e)}")
+
+@app.post("/ask-ai")
+def ask_ai(request: AIRequest):
+    try:
+        completion = client.chat.completions.create(
+        model="openai/gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": request.system_prompt},
+            {"role": "user", "content": request.prompt}
+            ],
+        temperature=request.temperature
+        )
+        reply = completion.choices[0].message.content
+        return {
+            "prompt": request.prompt,
+            "answer": reply,
+            "tokens_used": completion.usage.total_tokens if completion.usage else None
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI Provider Error: {str(e)}")
 
 @app.post("/ai/chat")
 def ai_chat(body: ChatCompletionRequest):

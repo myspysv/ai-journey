@@ -39,7 +39,7 @@ def convert_uah(amount_uah: float, currency_code: str, filename: str = "rates.js
 all_rates = fetch_nbu_rates()
 
 if all_rates:
-    filtered_rates = filter_currencies(all_rates, ["USD", "EUR"])
+    filtered_rates = filter_currencies(all_rates, ["USD", "EUR", "PLN"])
     save_to_json(filtered_rates)
 converted_uah = convert_uah(10000, "USD")
 print(converted_uah)
