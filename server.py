@@ -1,16 +1,19 @@
 import os
+import asyncio
+import time
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI, AuthenticationError, RateLimitError, APIConnectionError
 
 load_dotenv()
 
 api_key = os.getenv("OPENAI_API_KEY")
+
 if not api_key:
     raise ValueError("Помилка: OPENAI_API_KEY не знайдено у файлі .env!")
 
-client = OpenAI(
+client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=api_key,
 )
@@ -53,10 +56,42 @@ students_db = [
     {"id": 3, "name": "Ivan", "score": 68}
 ]
 
-@app.post("/translate")
-def translate(request: TranslateRequest):
+@app.post("/parallel")
+async def parallel(request: AIRequest):
+    start = time.perf_counter()
+
     try:
-        completion = client.chat.completions.create(
+        res1, res2 = await asyncio.gather(
+            client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Поясни тему простими словами, поверни короткий текст (2-3 речення)"},
+                    {"role": "user", "content": request.prompt}
+                ],
+            ),
+            client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Придумай 3 хештега до цієї теми"},
+                    {"role": "user", "content": request.prompt}
+                ],
+            ),
+        )
+        reply1 = res1.choices[0].message.content
+        reply2 = res2.choices[0].message.content
+        elapsed = time.perf_counter() - start
+        return {
+            "reply 1": reply1,
+            "reply 2": reply2,
+            "elapsed_time": round(elapsed, 2)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI Provider Error: {str(e)}")
+
+@app.post("/translate")
+async def translate(request: TranslateRequest):
+    try:
+        completion = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": f"You are a professional translator. Translate the user's text into {request.target_language}. Return ONLY the translation, no extra words."},
@@ -73,9 +108,9 @@ def translate(request: TranslateRequest):
         raise HTTPException(status_code=500, detail=f"AI Provider Error: {str(e)}")
 
 @app.post("/ask-ai")
-def ask_ai(request: AIRequest):
+async def ask_ai(request: AIRequest):
     try:
-        completion = client.chat.completions.create(
+        completion = await client.chat.completions.create(
         model="openai/gpt-4o-mini",
         messages=[
             {"role": "system", "content": request.system_prompt},
@@ -89,6 +124,16 @@ def ask_ai(request: AIRequest):
             "answer": reply,
             "tokens_used": completion.usage.total_tokens if completion.usage else None
         }
+
+    except AuthenticationError:
+        raise HTTPException(status_code=502, detail="Invalid AI API Key")
+
+    except RateLimitError:
+        raise HTTPException(status_code=429, detail="AI rate limit exceeded")
+
+    except APIConnectionError:
+        raise HTTPException(status_code=503, detail="AI service unreachable")
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI Provider Error: {str(e)}")
 
