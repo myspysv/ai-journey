@@ -8,6 +8,13 @@ from openai import AsyncOpenAI, AuthenticationError, RateLimitError, APIConnecti
 
 load_dotenv()
 
+chat_histories: dict[str, list[dict[str, str]]] = {}
+
+SYSTEM_PROMPT = (
+    "Ти - суворий, але справедливий АІ-ментор із Python та бекенду. "
+    "Відповідай чітко, по суті та українською мовою."
+)
+
 api_key = os.getenv("OPENAI_API_KEY")
 
 if not api_key:
@@ -50,11 +57,73 @@ class TranslateRequest(BaseModel):
     text: str
     target_language: str = "English"
 
+class ChatRequest(BaseModel):
+    session_id: str = Field(min_length=1, examples=["alex_1"])
+    message: str = Field(min_length=1)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+
 students_db = [
     {"id": 1, "name": "Alex", "score": 95},
     {"id": 2, "name": "Maria", "score": 82},
     {"id": 3, "name": "Ivan", "score": 68}
 ]
+
+def get_trimmed_history(history: list[dict[str, str]], max_recent: int = 6) -> list[dict[str, str]]:
+    if len(history) <= max_recent + 1:
+        return history
+    else:
+        return [history[0]] + history[-max_recent:]
+
+@app.post("/chat")
+async def chat_with_memory(request: ChatRequest):
+    if request.session_id not in chat_histories:
+        chat_histories[request.session_id] = [
+            {"role": "system", "content": SYSTEM_PROMPT}
+        ]
+
+    chat_histories[request.session_id].append(
+        {"role": "user", "content": request.message}
+    )
+
+    try:
+
+        trimmed_messages = get_trimmed_history(chat_histories[request.session_id])
+
+        completion = await client.chat.completions.create(
+            model="openai/gpt-4o-mini",
+            messages=trimmed_messages,
+            temperature=request.temperature,
+        )
+        reply = completion.choices[0].message.content
+
+        chat_histories[request.session_id].append(
+            {"role": "assistant", "content": reply}
+        )
+
+        return {
+            "session_id": request.session_id,
+            "reply": reply,
+            "messages_in_history": len(chat_histories[request.session_id])
+        }
+
+    except Exception as e:
+        chat_histories[request.session_id].pop()
+        raise HTTPException(status_code=500, detail=f"AI Error: {str(e)}")
+
+@app.get("/chat/{session_id}")
+def get_chat(session_id: str):
+    if not session_id in chat_histories:
+        raise HTTPException(status_code=404, detail="Session not found")
+    else:
+        return {"chat_history": chat_histories.get(session_id)}
+
+@app.delete("/chat/{session_id}")
+def delete_chat(session_id: str):
+    if not session_id in chat_histories:
+        raise HTTPException(status_code=404, detail="Session not found")
+    else:
+        chat_histories.pop(session_id, None)
+    return {"status": "cleared", "session_id": session_id}
 
 @app.post("/parallel")
 async def parallel(request: AIRequest):
@@ -180,14 +249,6 @@ def analyze_user_text(
         is_pinned: bool = False
 ):
     return {"project_id": project_id, "is_pinned": is_pinned, "author": note.author, "text": note.text}
-
-@app.post("/chat")
-def fake_ai_chat(request: PromptRequest):
-    return {
-        "user_prompt": request.prompt,
-        "used_temperature": request.temperature,
-        "ai_reply": f"Я отримав твій запит '{request.prompt}' і думаю..."
-    }
 
 @app.get("/students")
 def get_students(min_score: int = 0):
