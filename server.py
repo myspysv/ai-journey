@@ -1,6 +1,8 @@
 import os
 import asyncio
 import time
+import json
+import httpx
 from typing import Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ValidationError
@@ -113,11 +115,71 @@ JSON має містити рівно 2 поля:
 - "action_items": повертає масив з конкретних task (задача) та assignee (хто відповідальний), якщо невідомий assignee - впиши туди null
 """
 
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_crypto_price",
+            "description": "Отримує поточну ціну криптовалюти в доларах США (USD). Використовуй це, коли користувач питає про вартість або курс криптовалюти.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "coin": {
+                        "type": "string",
+                        "description": "ID криптовалюти англійською в нижньому регістрі, наприклад: 'bitcoin', 'ethereum', 'solana'"
+                    }
+                },
+                "required": ["coin"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_currency_rate",
+            "description": "Отримує поточний курс іноземної валюти до гривні (UAH) з НБУ. Використовуй це, коли користувач питає про вартість або курс валюти.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "currency_code": {
+                        "type": "string",
+                        "description": "ID валюти англійською в верхньому регістрі, наприклад: 'USD', 'EUR', 'PLN'"
+                    }
+                },
+                "required": ["currency_code"]
+            }
+        }
+    },
+    {
+            "type": "function",
+            "function": {
+                "name": "save_price_alert",
+                "description": "Зберігає текстове нагадування або нотатку в пам'ять сервера. Використовуй це, коли користувач просить щось запам'ятати, записати або зберегти нагадування.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "note": {
+                            "type": "string",
+                            "description": "Текст нагадування, який потрібно зберегти (наприклад: 'Ціна Ethereum: $3200')"
+                        }
+                    },
+                    "required": ["note"]
+                }
+            }
+        }
+]
+
 students_db = [
     {"id": 1, "name": "Alex", "score": 95},
     {"id": 2, "name": "Maria", "score": 82},
     {"id": 3, "name": "Ivan", "score": 68}
 ]
+
+saved_alerts: list[str] = []
+
+async def save_price_alert(note: str) -> str:
+    saved_alerts.append(note)
+    return json.dumps({"status": "saved", "total_alerts": len(saved_alerts)})
 
 def get_trimmed_history(history: list[dict[str, str]], max_recent: int = 6) -> list[dict[str, str]]:
     if len(history) <= max_recent + 1:
@@ -125,6 +187,97 @@ def get_trimmed_history(history: list[dict[str, str]], max_recent: int = 6) -> l
     else:
         return [history[0]] + history[-max_recent:]
 
+async def get_currency_rate(currency_code: str) -> str:
+    url = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json"
+
+    async with httpx.AsyncClient(timeout=10.0) as http_client:
+        response = await http_client.get(url)
+        if response.status_code != 200:
+            return json.dumps({"error": f"API повернуло статус {response.status_code}"})
+
+        data = response.json()
+        target_code = currency_code.upper()
+
+        for item in data:
+            if item.get("cc") == target_code:
+                return json.dumps({
+                    "currency": target_code,
+                    "rate_uah": item.get("rate"),
+                    "date": item.get("exchangedate")
+                })
+
+        return json.dumps({"error": f"Валюту '{currency_code}' не знайдено"})
+    
+async def get_crypto_price(coin: str) -> str:
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    params = {"ids": coin.lower(), "vs_currencies": "usd"}
+
+    async with httpx.AsyncClient(timeout=10.0) as http_client:
+        response = await http_client.get(url, params=params)
+        if response.status_code != 200:
+            return json.dumps({"error": f"API повернуло статус {response.status_code}"})
+
+        data = response.json()
+        if coin.lower() not in data:
+            return json.dumps({"error": f"Монету '{coin}' не знайдено"})
+
+        price = data[coin.lower()]["usd"]
+        return json.dumps({"coin": coin, "price_usd": price})
+
+AVAILABLE_TOOLS = {
+    "get_crypto_price": get_crypto_price,
+    "get_currency_rate": get_currency_rate,
+    "save_price_alert": save_price_alert
+}
+
+@app.post("/ask-agent")
+async def ask_agent(request: AIRequest):
+    messages = [
+        {"role": "system", "content": "Ти — корисний фінансовий AI-асистент. Відповідай українською."},
+        {"role": "user", "content": request.prompt}
+    ]
+
+    try:
+        max_steps = 5
+        used_tools = []
+        
+        for step in range(max_steps):
+            response = await client.chat.completions.create(
+                model="openai/gpt-4o-mini",
+                messages=messages,
+                tools=tools,
+            )
+            assistant_msg = response.choices[0].message
+
+            if not assistant_msg.tool_calls:
+                return {
+                    "answer": assistant_msg.content,
+                    "used_tools": used_tools,
+                    "steps": step + 1
+                }
+                
+            messages.append(assistant_msg)
+            for tool_call in assistant_msg.tool_calls:
+                func_name = tool_call.function.name
+                func_args = json.loads(tool_call.function.arguments)
+
+                if func_name in AVAILABLE_TOOLS:
+                    tool_result = await AVAILABLE_TOOLS[func_name](**func_args)
+                else:
+                    tool_result = json.dumps({"error": "Невідомий інструмент"})
+                used_tools.append(func_name)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_result
+                })
+        raise HTTPException(status_code=500, detail="Агент перевищив ліміт кроків")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Agent Error: {str(e)}")
+        
 @app.post("/extract-tasks", response_model=MeetingNotes)
 async def extract_tasks(request: RawRequest):
     try:
@@ -366,6 +519,10 @@ def analyze_user_text(
         is_pinned: bool = False
 ):
     return {"project_id": project_id, "is_pinned": is_pinned, "author": note.author, "text": note.text}
+
+@app.get("/alerts")
+def get_alerts():
+    return {"alerts": saved_alerts}
 
 @app.get("/students")
 def get_students(min_score: int = 0):
