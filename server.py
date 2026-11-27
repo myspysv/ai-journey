@@ -1,8 +1,9 @@
 import os
 import asyncio
 import time
+from typing import Literal
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, AuthenticationError, RateLimitError, APIConnectionError
 
@@ -62,6 +63,56 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
 
+class RawRequest(BaseModel):
+    text: str = Field(min_length=5)
+
+class FeedbackAnalysis(BaseModel):
+    sentiment: Literal["positive", "neutral", "negative"]
+    urgency_score: int = Field(ge=1, le=10)
+    main_issue: str
+    suggested_reply: str
+
+class VacancyInfo(BaseModel):
+    job_title: str
+    company: str | None = None
+    salary_usd: int | None = None
+    is_remote: bool
+    skills: list[str]
+
+class ActionItem(BaseModel):
+    task: str
+    assignee: str | None = None
+
+class MeetingNotes(BaseModel):
+    summary: str
+    action_items: list[ActionItem]
+
+ANALYZE_SYSTEM_PROMPT = """
+Ти — система аналізу відгуків клієнтів. Проаналізуй текст користувача та поверни відповідь СУВОРО у форматі JSON.
+JSON має містити рівно 4 поля:
+- "sentiment": одне зі значень "positive", "negative" або "neutral"
+- "urgency_score": ціле число від 1 до 10 (де 10 — критична проблема, клієнт у люті)
+- "main_issue": короткий опис головної проблеми або теми (1 речення українською)
+- "suggested_reply": ввічлива та професійна відповідь служби підтримки (1-2 речення українською)
+"""   
+
+PARSE_VACANCY_PROMPT = """
+Ти — бот-агрегатор вакансій, який читає хаотичні пости з Telegram-каналів і складає їх у базу даних. Проаналізуй текст користувача та поверни відповідь СУВОРО у форматі JSON.
+JSON має містити рівно 5 полів:
+- "job_title": назва посади
+- "company": назва компанії або null, якщо не вказана
+- "salary_usd": число в доларах або null, якщо не вказано
+- "is_remote": true чи false
+- "skills": список технологій, напр. ["Python", "FastAPI", "SQL"]
+"""
+
+EXTRACT_TASKS_PROMPT = """
+Ти - бот, який читає текст зустрічі та витягує список задач. Проаналізуй текст користувача та поверни відповідь СУВОРО у форматі JSON.
+JSON має містити рівно 2 поля:
+- "summary": короткий зміст зустрічі
+- "action_items": повертає масив з конкретних task (задача) та assignee (хто відповідальний), якщо невідомий assignee - впиши туди null
+"""
+
 students_db = [
     {"id": 1, "name": "Alex", "score": 95},
     {"id": 2, "name": "Maria", "score": 82},
@@ -73,6 +124,72 @@ def get_trimmed_history(history: list[dict[str, str]], max_recent: int = 6) -> l
         return history
     else:
         return [history[0]] + history[-max_recent:]
+
+@app.post("/extract-tasks", response_model=MeetingNotes)
+async def extract_tasks(request: RawRequest):
+    try:
+        completion = await client.chat.completions.create(
+            model="openai/gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": EXTRACT_TASKS_PROMPT},
+                {"role": "user", "content": request.text}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+        )
+
+        raw_json=completion.choices[0].message.content
+        extract = MeetingNotes.model_validate_json(raw_json)
+        return extract
+
+    except ValidationError as ve:
+        raise HTTPException(status_code=502, detail=f"AI повернув некоректну структуру даних: {ve}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Помилка серверу: {str(e)}")
+    
+@app.post("/parse-vacancy", response_model=VacancyInfo)
+async def parse_vacancy(request: RawRequest):
+    try:
+        completion = await client.chat.completions.create(
+            model="openai/gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": PARSE_VACANCY_PROMPT},
+                {"role": "user", "content": request.text}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+        )
+
+        raw_json=completion.choices[0].message.content
+        parsed = VacancyInfo.model_validate_json(raw_json)
+        return parsed
+
+    except ValidationError as ve:
+        raise HTTPException(status_code=502, detail=f"AI повернув некоректну структуру даних: {ve}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Помилка серверу: {str(e)}")
+
+@app.post("/analyze", response_model=FeedbackAnalysis)
+async def analyze_feedback(request: RawRequest):
+    try:
+        completion = await client.chat.completions.create(
+            model="openai/gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": ANALYZE_SYSTEM_PROMPT},
+                {"role": "user", "content": request.text}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+        )
+
+        raw_json = completion.choices[0].message.content
+        analysis = FeedbackAnalysis.model_validate_json(raw_json)
+        return analysis
+
+    except ValidationError as ve:
+        raise HTTPException(status_code=502, detail=f"AI повернув некоректну структуру даних: {ve}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Помилка серверу: {str(e)}")
 
 @app.post("/chat")
 async def chat_with_memory(request: ChatRequest):
@@ -227,7 +344,7 @@ def ai_generate(config: PromptConfig):
     }
 
 
-@app.post("/analyze")
+@app.post("/analyze-text")
 def analyze_text(request: TextRequest):
     words = request.text.split()
     if not words:
